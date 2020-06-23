@@ -32,6 +32,8 @@ use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{ReadableArgs, Writeable};
 use lightning::util::config;
 
+use lightning_persist_data::{ChannelDataPersister, LinuxPersister};
+
 use bitcoin::util::{bip32, bip143};
 use bitcoin::blockdata;
 use bitcoin::network::constants;
@@ -341,31 +343,31 @@ impl ChannelMonitor {
 #[error("OSX creatively eats your data, using Lightning on OSX is unsafe")]
 struct ERR {}
 
-impl channelmonitor::ManyChannelMonitor<InMemoryChannelKeys> for ChannelMonitor {
-	fn add_monitor(&self, funding_txo: chain::transaction::OutPoint, monitor: channelmonitor::ChannelMonitor<InMemoryChannelKeys>) -> Result<(), channelmonitor::ChannelMonitorUpdateErr> {
-		self.monitor.add_monitor(funding_txo, monitor)?;
-		self.write_monitor(&self.monitor.get_monitor_ref_by_key(&funding_txo).unwrap())
-	}
+// impl channelmonitor::ManyChannelMonitor<InMemoryChannelKeys> for ChannelMonitor {
+// 	fn add_monitor(&self, funding_txo: chain::transaction::OutPoint, monitor: channelmonitor::ChannelMonitor<InMemoryChannelKeys>) -> Result<(), channelmonitor::ChannelMonitorUpdateErr> {
+// 		self.monitor.add_monitor(funding_txo, monitor)?;
+// 		self.write_monitor(&self.monitor.get_monitor_ref_by_key(&funding_txo).unwrap())
+// 	}
 
-	fn update_monitor(&self, funding_txo: chain::transaction::OutPoint, update: channelmonitor::ChannelMonitorUpdate) -> Result<(), channelmonitor::ChannelMonitorUpdateErr> {
-		self.monitor.update_monitor(funding_txo, update)?;
-		self.write_monitor(&self.monitor.get_monitor_ref_by_key(&funding_txo).unwrap())
-	}
+// 	fn update_monitor(&self, funding_txo: chain::transaction::OutPoint, update: channelmonitor::ChannelMonitorUpdate) -> Result<(), channelmonitor::ChannelMonitorUpdateErr> {
+// 		self.monitor.update_monitor(funding_txo, update)?;
+// 		self.write_monitor(&self.monitor.get_monitor_ref_by_key(&funding_txo).unwrap())
+// 	}
 
-	fn get_and_clear_pending_htlcs_updated(&self) -> Vec<channelmonitor::HTLCUpdate> {
-		self.monitor.get_and_clear_pending_htlcs_updated()
-	}
-}
+// 	fn get_and_clear_pending_htlcs_updated(&self) -> Vec<channelmonitor::HTLCUpdate> {
+// 		self.monitor.get_and_clear_pending_htlcs_updated()
+// 	}
+// }
 
-struct LogPrinter {}
-impl Logger for LogPrinter {
-	fn log(&self, record: &Record) {
-		let log = record.args.to_string();
-		if !log.contains("Received message of type 258") && !log.contains("Received message of type 256") && !log.contains("Received message of type 257") {
-			eprintln!("{} {:<5} [{}:{}] {}", OffsetDateTime::now_utc().format("%F %T"), record.level.to_string(), record.module_path, record.line, log);
-		}
-	}
-}
+// struct LogPrinter {}
+// impl Logger for LogPrinter {
+// 	fn log(&self, record: &Record) {
+// 		let log = record.args.to_string();
+// 		if !log.contains("Received message of type 258") && !log.contains("Received message of type 256") && !log.contains("Received message of type 257") {
+// 			eprintln!("{} {:<5} [{}:{}] {}", OffsetDateTime::now_utc().format("%F %T"), record.level.to_string(), record.module_path, record.line, log);
+// 		}
+// 	}
+// }
 
 #[tokio::main]
 async fn main() {
@@ -456,12 +458,24 @@ async fn main() {
 	let starting_blockhash = BlockHash::from_hex(starting_chaininfo["bestblockhash"].as_str().unwrap()).unwrap();
 	let starting_blockheight: usize = starting_chaininfo["blocks"].as_u64().unwrap().try_into().unwrap();
 
-	let mut monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"), starting_blockhash.clone(), (rpc_path_parts[0], rpc_path_parts[1]), chain_monitor.clone(), fee_estimator.clone()).await;
-	let monitor = Arc::new(ChannelMonitor {
-		monitor: Arc::new(channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone(), fee_estimator.clone())),
-		file_prefix: data_path.clone() + "/monitors",
-	});
-	block_notifier.register_listener(Arc::clone(&(monitor.monitor.clone() as Arc<dyn chaininterface::ChainListener>)));
+	// let mut monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"), starting_blockhash.clone(), (rpc_path_parts[0], rpc_path_parts[1]), chain_monitor.clone(), fee_estimator.clone()).await;
+	// let monitor = Arc::new(ChannelMonitor {
+	// let monitor: Arc::new(channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone(), fee_estimator.clone())),
+  let backup_handler: Arc::new(ChannelDataPersister = LinuxPersister::new(data_path.clone() + "/monitors"));
+
+                          // TODO: this whole block should become some kind of closure that gets passed to the SimpleManyChannelMonitor
+                          // so it can handle the syncing on startup. Requires some changes to Matt's SPV RL PR #614 such as shifting
+                          // the AChainListener trait to live in RL.
+                          let fetched_chan_data = backup_handler.fetch_all_channel_data().unwrap();
+                          for chan in fetched_chan_data {
+								              if let Ok((last_block_hash, mut loaded_monitor)) = <(BlockHash, channelmonitor::ChannelMonitor<InMemoryChannelKeys>)>::read(&mut Cursor::new(&chan.1), Arc::new(LogPrinter{})) {
+									                let monitor_data = (&mut loaded_monitor, &*broadcaster, &*feeest);
+									                init_sync_chain_monitor(starting_blockhash.clone(), last_block_hash, rpc_client, monitor_data).await;
+                              }
+                          }
+
+	let	monitor = Arc::new(channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone(), fee_estimator.clone(), backup_handler.clone()).await);
+	block_notifier.register_listener(Arc::clone(&(monitor.clone() as Arc<dyn chaininterface::ChainListener>)));
 
 	let mut config: config::UserConfig = Default::default();
 	config.channel_options.fee_proportional_millionths = FEE_PROPORTIONAL_MILLIONTHS;
@@ -478,7 +492,6 @@ async fn main() {
 				keys_manager: keys.clone(),
 				fee_estimator: fee_estimator.clone(),
 				monitor: monitor.clone(),
-				//chain_monitor: chain_monitor.clone(),
 				tx_broadcaster: chain_monitor.clone(),
 				logger: logger.clone(),
 				default_config: config,
